@@ -1,67 +1,26 @@
-import asyncio, uuid, subprocess
-from pathlib import Path
-from .gitwork import WorktreeManager, run_git
-from .runner import OpenCodeRunner
-
-class TaskEngine:
-    def __init__(self, store, registry, config, reporter):
-        self.store, self.registry, self.config, self.reporter = store, registry, config, reporter
-        self.sem = asyncio.Semaphore(config.MAX_CONCURRENT)
-        self.worktrees = WorktreeManager(config.WORKTREES)
-        self.runner = OpenCodeRunner(config.OPENCODE_BIN, config.TIMEOUT)
-        self.active = {}
-
-    def create_task(self, project_id, prompt, chat_id):
-        task_id = uuid.uuid4().hex[:8]
-        self.store.create(task_id, project_id, prompt, chat_id)
-        asyncio.create_task(self.process(task_id))
-        return task_id
-
-    async def process(self, task_id):
-        async with self.sem:
-            row = self.store.get(task_id)
-            project = self.registry.get(row["project"])
-            if not project:
-                self.store.update(task_id, "failed", result="Unknown project")
-                await self.reporter(row["chat_id"], f"Task {task_id}: unknown project.")
-                return
-            wt = None
-            try:
-                self.store.update(task_id, "preparing")
-                wt, branch = await asyncio.to_thread(self.worktrees.prepare, project, task_id)
-                self.store.update(task_id, "running", branch=branch, worktree=wt)
-                self.active[task_id] = wt
-                prompt = (
-                    "You are a coding agent operating on this task in an isolated git worktree. "
-                    "Follow repository instructions (including AGENTS.md and relevant specs). "
-                    "Do not modify unrelated files, do not merge, deploy, or push. "
-                    "Make the requested change, run appropriate tests if possible, and summarize.\n\nTASK:\n" + row["prompt"]
-                )
-                code, output = await asyncio.to_thread(self.runner.execute, prompt, wt)
-                self.store.update(task_id, "verifying")
-                verification = []
-                for command in project.get("verification", []):
-                    # Configuration-only command list; task text cannot add commands.
-                    p = await asyncio.to_thread(subprocess.run, command, cwd=wt, shell=True,
-                        text=True, capture_output=True, timeout=300)
-                    verification.append(f"$ {command}\nexit={p.returncode}\n{p.stdout}\n{p.stderr}")
-                    if p.returncode: code = code or p.returncode
-                summary = f"OpenCode exit code: {code}\n\nOutput (tail):\n{output[-12000:]}"
-                if verification: summary += "\n\nConfigured verification:\n" + "\n\n".join(verification)
-                if code == 0 and project.get("auto_commit", False):
-                    await asyncio.to_thread(run_git, ["add", "-A"], wt)
-                    # Prevent empty commit.
-                    status = await asyncio.to_thread(run_git, ["status", "--porcelain"], wt)
-                    if status:
-                        await asyncio.to_thread(run_git, ["commit", "-m", f"sidekick: {task_id}"], wt)
-                        if project.get("auto_push", False):
-                            await asyncio.to_thread(run_git, ["push", "-u", "origin", branch], wt)
-                            summary += f"\n\nPushed branch: {branch}"
-                state = "completed" if code == 0 else "failed"
-                self.store.update(task_id, state, result=summary)
-                await self.reporter(row["chat_id"], f"Task {task_id} — {state}\nProject: {row['project']}\nBranch: {branch}\n\n{summary}")
-            except Exception as e:
-                self.store.update(task_id, "failed", result=str(e))
-                await self.reporter(row["chat_id"], f"Task {task_id} failed: {e}")
-            finally:
-                self.active.pop(task_id, None)
+import asyncio,uuid,subprocess
+from .gitwork import Worktrees,git
+from .runner import Runner
+class Engine:
+ def __init__(self,store,registry,cfg,report):
+  self.store,self.registry,self.cfg,self.report=store,registry,cfg,report;self.sem=asyncio.Semaphore(cfg.MAX_CONCURRENT);self.wt=Worktrees(cfg.WORKTREES);self.runner=Runner(cfg.OPENCODE_BIN,cfg.TIMEOUT);self.active={}
+ def submit(self,pid,prompt,chat):
+  tid=uuid.uuid4().hex[:8];self.store.create(tid,pid,prompt,chat);asyncio.create_task(self.run_task(tid));return tid
+ async def run_task(self,tid):
+  async with self.sem:
+   r=self.store.get(tid);p=self.registry.get(r['project'])
+   if not p:self.store.update(tid,'failed',result='Unknown project');await self.report(r['chat_id'],'Unknown project');return
+   try:
+    self.store.update(tid,'preparing');w,b=await asyncio.to_thread(self.wt.create,p,tid);self.active[tid]=w;self.store.update(tid,'running',branch=b,worktree=w)
+    prompt='Read repo instructions and relevant specs. Do not push, merge or deploy. Implement this task and test it.\nTASK:\n'+r['prompt'];code,out=await asyncio.to_thread(self.runner.run,prompt,w);self.store.update(tid,'verifying');checks=[]
+    for cmd in p.get('verification',[]):
+     x=await asyncio.to_thread(subprocess.run,cmd,cwd=w,shell=True,text=True,capture_output=True,timeout=300);checks.append(cmd+' exit='+str(x.returncode)+'\n'+x.stdout[-2000:]);code=code or x.returncode
+    summary='Exit: '+str(code)+'\n'+out[-8000:]+('\nChecks:\n'+'\n'.join(checks) if checks else '')
+    if code==0 and p.get('auto_commit',False):
+     await asyncio.to_thread(git,['add','-A'],w)
+     if await asyncio.to_thread(git,['status','--porcelain'],w):
+      await asyncio.to_thread(git,['commit','-m','Sidekick '+tid],w)
+      if p.get('auto_push',False):await asyncio.to_thread(git,['push','-u','origin',b],w);summary+='\nPushed '+b
+    s='completed' if code==0 else 'failed';self.store.update(tid,s,result=summary);await self.report(r['chat_id'],tid+' '+s+'\n'+summary[:3500])
+   except Exception as e:self.store.update(tid,'failed',result=str(e));await self.report(r['chat_id'],tid+' FAILED: '+str(e))
+   finally:self.active.pop(tid,None)
