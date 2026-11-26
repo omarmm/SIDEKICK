@@ -1,0 +1,13 @@
+{
+  "projects": [
+    {
+      "id": "demo",
+      "name": "Demo Project",
+      "repo": "/absolute/path/to/your/repository",
+      "default_branch": "main",
+      "verification": [],
+      "auto_commit": false,
+      "auto_push": false
+    }
+  ]
+}
