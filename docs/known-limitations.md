@@ -1,0 +1,1 @@
+- Single owner.\n- Worktree is not a security sandbox.\n- No restart recovery, cancellation, streaming, PR, merge or deployment.\n- No automatic worktree cleanup.\n- Verification shell commands are trusted configuration.\n- Auto-commit and auto-push are opt-in settings.\n
