@@ -1,0 +1,1 @@
+Install Python 3.11+, Git, OpenCode CLI and authenticate OpenCode.\n\nClone, install dependencies, copy .env.example to .env and projects.example.json to projects.json, edit both, then run python main.py.\n\nTelegram: /projects, /run PROJECT task. Test first against a disposable repository.\n
